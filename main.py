@@ -1,5 +1,6 @@
 import re
 import os
+import config
 
 QUALITY_LIMIT = 50
 CHAIN_LEN_LIMIT = 10
@@ -14,6 +15,7 @@ class EventRecord:
         self.region_stop = region_stop
         self.event = event
 
+
 class Mutation_record:
     def __init__(self, line):
         fields = line.split('\t')
@@ -27,9 +29,7 @@ class Mutation_record:
         self.event_code = int(fields[10])
 
 
-def parse_vfc_file(input_file, output_file):
-
-
+def parse_vfc_file(input_file, output_file, contains_control_sample, control_sample_idx):
     output_file = open(output_file, "w")
     output_file.write("sample\tchrom\tposition\tref\talt\tgt\tdp\tref_counts\tvar_counts\tcn_n\n")
 
@@ -39,17 +39,14 @@ def parse_vfc_file(input_file, output_file):
             if line.startswith("##"):
                 continue
             elif line.startswith("#"):
-                print("v jednej mriezke")
-                list_of_samples, control_sample_positions = parse_vfc_header(line)
+                biopsy_names = parse_vfc_header(line)
             else:
-                parse_vfc_line(list_of_samples, control_sample_positions, line, output_file)
+                parse_vfc_line(biopsy_names, line, output_file, contains_control_sample, control_sample_idx)
 
     output_file.close()
 
 
 def parse_vfc_header(line):
-    control_sample_positions = []
-
     line = re.sub(r".*FORMAT", "", line).strip()
     biopsy_names = line.split("\t")
     return biopsy_names
@@ -60,7 +57,8 @@ def parse_vfc_header(line):
     #
     # return biopsy_names, control_sample_positions
 
-def parse_vfc_line(list_of_samples, control_sample_positions, line, output_file):
+
+def parse_vfc_line(biopsy_names, line, output_file, contains_control_sample, control_sample_idx):
     line = line.split("\t")
     chrom = line[0]
     pos = line[1]
@@ -70,14 +68,20 @@ def parse_vfc_line(list_of_samples, control_sample_positions, line, output_file)
     samples = line[9:]
 
     if quality > QUALITY_LIMIT and len(alt) <= CHAIN_LEN_LIMIT and len(ref) <= CHAIN_LEN_LIMIT:
-        for control_sample_id in control_sample_positions:
-            control_sample_values = parse_sample(samples[control_sample_id])
+        if contains_control_sample:
+            control_sample_values = parse_sample(samples[control_sample_idx])
             if control_sample_is_without_mutations(control_sample_values):
                 for i in range(len(samples)):
                     sample = samples[i]
                     sample_values = parse_sample(sample)
                     if tumor_sample_has_mutation(sample_values):
-                        save_tumor_sample(list_of_samples[i], sample_values, chrom, pos, ref, alt, output_file)
+                        save_tumor_sample(biopsy_names[i], sample_values, chrom, pos, ref, alt, output_file)
+        else:
+            for i in range(len(samples)):
+                sample = samples[i]
+                sample_values = parse_sample(sample)
+                if tumor_sample_has_mutation(sample_values):
+                    save_tumor_sample(biopsy_names[i], sample_values, chrom, pos, ref, alt, output_file)
 
 
 def parse_sample(sample):
@@ -103,10 +107,13 @@ def tumor_sample_has_mutation(sample_values):
     if sample_values['gt'] == '0/0':
         return False
     else:
-        ad_ref = sample_values['ad'][0]
-        ad_alt = sample_values['ad'][1]
-        if ad_alt > 0:
-            return True
+        try:
+            ad_ref = sample_values['ad'][0]
+            ad_alt = sample_values['ad'][1]
+            if ad_alt > 0:
+                return True
+        except IndexError:
+            pass
     return False
 
 
@@ -133,21 +140,28 @@ def save_tumor_sample(sample_name, sample_values, chrom, pos, ref, alt, output_f
         output_file.write(output_line)
 
 
-def read_event_file(events_cache, event_files_dir, tumor_idx):
+def read_event_file(events_cache, event_files_dir):
+    sample_idx = []
 
-    for i, file_name in enumerate(os.listdir(event_files_dir)):
+    for file_name in os.listdir(event_files_dir):
+        sample_id = file_name.replace('.Tumor_events.txt', '')
+        sample_idx.append(sample_id)
+
         with open(os.path.join(event_files_dir, file_name)) as file:
             lines = file.readlines()
             for line in lines:
-                if line.startswith("chr"):
-                    events_cache = parse_event_file_line(line, tumor_idx[i], events_cache)
+                if not (line.startswith("#") or line.startswith("Chromosome")):
+                    events_cache = parse_event_file_line(line, sample_id, events_cache)
                 else:
                     continue
 
-    return events_cache
+    return events_cache, sample_idx
 
 
 def parse_event_file_line(line, tumor_id, events_cache_memory):
+    line = line.replace('"', '')
+    line = re.sub(r'^.*?chr', 'chr', line)
+
     chromosome, split_line = line.split(':', maxsplit=1)
     start, split_line = split_line.split('-', maxsplit=1)
     stop, split_line = split_line.split('\t', maxsplit=1)
@@ -163,11 +177,9 @@ def parse_event_file_line(line, tumor_id, events_cache_memory):
     return events_cache_memory
 
 
-def add_events_to_parsed_vcf(parsed_vcf_file_path, output_file,  tumor_idx, events_cache_memory):
+def add_events_to_parsed_vcf(parsed_vcf_file_path, output_file, tumor_idx, events_cache):
     output_file = open(output_file, "w")
     output_file.write("sample\tchrom\tposition\tref\talt\tgt\tdp\tref_counts\tvar_counts\tcn_n\tcn_v\tevent\n")
-
-    # output_file.write("sample\tchrom\tposition\tref\talt\tgt\tdp\tref_counts\tvar_counts\tcn_n\n")
 
     with open(parsed_vcf_file_path) as file:
         lines = file.readlines()
@@ -176,57 +188,65 @@ def add_events_to_parsed_vcf(parsed_vcf_file_path, output_file,  tumor_idx, even
                 if line.startswith("sample"):
                     continue
                 else:
-                    find_mutation_event(line, tumor_id, events_cache_memory, output_file)
+                    find_mutation_event(line, tumor_id, events_cache, output_file)
 
     output_file.close()
 
 
-def find_mutation_event(line, tumor_id, events_chache_memory, output_file):
+def find_mutation_event(line, tumor_id, events_cache, output_file):
     line_splits = line.split('\t')
     sample_id = line_splits[0]
     chrom = line_splits[1]
     position = int(line_splits[2])
 
-    check(line, sample_id, chrom, position, tumor_id, events_chache_memory, output_file)
+    check_position(line, sample_id, chrom, position, tumor_id, events_cache, output_file)
 
 
-def check(line, sample_id, chrom, position, tumor_id, events_cache_memory, output_file):
+def check_position(line, sample_id, chrom, position, tumor_id, events_cache, output_file):
     if sample_id == tumor_id:
-        for events_record in events_cache_memory:
-            if events_record.tumor_id == sample_id:
-                if events_record.chromosome == chrom:
-                    if events_record.region_start <= position < events_record.region_stop:
-                        if events_record.event != 'Allelic Imbalance':  #precoooo
-                            output_line = line.replace('\n', '')
-                            output_line += '\t'
-                            output_line += EVENT_MAPPING[events_record.event]
-                            output_line += '\t'
-                            output_line += events_record.event
-                            output_line = output_line + '\n'
-                            output_file.write(output_line)
+        for events_record in events_cache:
+            if events_record.tumor_id == sample_id and \
+                    events_record.chromosome == chrom and \
+                    events_record.region_start <= position < events_record.region_stop and \
+                    events_record.event != 'Allelic Imbalance':  # precoooo
+
+                output_line = line.replace('\n', '')
+                output_line += '\t'
+
+                try:
+                    output_line += EVENT_MAPPING[events_record.event]
+                except KeyError:
+                    print('Unknown event found - ', events_record.event)
+                    continue
+
+                output_line += '\t'
+                output_line += events_record.event
+                output_line = output_line + '\n'
+                output_file.write(output_line)
     else:
         return None
 
 
 def generate_pyclone_input(input_file, output_file):
     output_file = open(output_file, "w")
-    output_file.write("id\tref_counts\tvar_counts\tcn_n\tcn_v\n")
+    output_file.write("position_id\tmutation_id\tref_counts\tvar_counts\tcn_n\tcn_v\n")
 
     with open(input_file) as file:
         lines = file.readlines()
-        for line in lines[1:]:
+        for i, line in enumerate(lines[1:]):
             fields = line.split('\t')
             ref_counts = fields[7]
             var_counts = fields[8]
             cn_n = fields[9]
             cn_v = fields[10]
-            idx = fields[0]+fields[1]+fields[2]
+            position_id = fields[0] + '_' + fields[1] + '_' + fields[2]  # sample, chromosome, position
 
-            output_line = idx + '\t' + ref_counts + '\t' + var_counts + '\t' + cn_n + '\t' + cn_v + '\n'
+            output_line = position_id + '\t' + str(i) + '\t' + ref_counts + '\t' + \
+                          var_counts + '\t' + cn_n + '\t' + cn_v + '\n'
+
             output_file.write(output_line)
 
     output_file.close()
-
 
 
 # generate genotypes according to mutation or reference allele and copy numbers
@@ -259,7 +279,7 @@ def generate_genotypes(mutation, output_file):
         line += str(mutation.event_code) + '\t' + genotype + '\n'
         output_file.write(line)
     else:
-        for i in range(mutation.event_code+1):
+        for i in range(mutation.event_code + 1):
             genotype = ''
             for j in range(i):
                 genotype += first
@@ -268,7 +288,8 @@ def generate_genotypes(mutation, output_file):
                 genotype += second
 
             line = mutation.sample_id + '\t' + mutation.chromosome + '\t' + mutation.position + '\t' + mutation.reference + '\t'
-            line += mutation.alternative + '\t' + str(mutation.ad_reference) + '\t' + str(mutation.ad_alternative) + '\t'
+            line += mutation.alternative + '\t' + str(mutation.ad_reference) + '\t' + str(
+                mutation.ad_alternative) + '\t'
             line += str(mutation.event_code) + '\t' + genotype + '\n'
             output_file.write(line)
 
@@ -277,22 +298,25 @@ def generate_genotypes(mutation, output_file):
 
 if __name__ == '__main__':
     parse_vfc_file(input_file='./Samples/P1/P1.346403.WGS.HF.Source.vcf',
-                   output_file='./Samples/P1/tmp/parsed_vcf.txt')
+                   output_file='./Samples/P1/P1_parsed_vcf.txt',
+                   contains_control_sample=True,
+                   control_sample_idx=0
+                   )
 
-    # tumor_idx = ['I062_007.T', 'I062_015.T', 'I062_022.T', 'I062.033.T']
+    events_cache_memory = []
+    events_cache_memory, sample_names = read_event_file(events_cache=events_cache_memory,
+                                                        event_files_dir='./Samples/P1/events')
 
-    # events_cache_memory = []
-    # events_cache_memory = read_event_file(events_cache=events_cache_memory,
-    #                                       event_files_dir='./files/EVENTS',
-    #                                       tumor_idx=tumor_idx)
-    #
-    # add_events_to_parsed_vcf(parsed_vcf_file_path="./files/OUTPUT/parsed_vcf_pyclone.txt",
-    #                          output_file="./files/OUTPUT/output_with_events_pyclone.txt",
-    #                          tumor_idx=tumor_idx,
-    #                          events_cache_memory=events_cache_memory)
-    #
-    # generate_pyclone_input(input_file="./files/OUTPUT/output_with_events_pyclone.txt",
-    #                       output_file="./files/OUTPUT/pyclone_0.11.0_input")
+    print(sample_names)
+
+    add_events_to_parsed_vcf(parsed_vcf_file_path='./Samples/P1/P1_parsed_vcf.txt',
+                             output_file='./Samples/P1/P1_parsed_vcf_events.txt',
+                             tumor_idx=sample_names,
+                             events_cache=events_cache_memory)
+
+    generate_pyclone_input(input_file='./Samples/P1/P1_parsed_vcf_events.txt',
+                          output_file='./Samples/P1/P1_pyclone.txt')
+
+
     # # create_genotypes_file("./files/OUTPUT/output_with_events.txt")
     #
-
