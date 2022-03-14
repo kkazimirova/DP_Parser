@@ -1,9 +1,8 @@
 import re
 import os
-import config
 
-QUALITY_LIMIT = 50
-CHAIN_LEN_LIMIT = 10
+QUALITY_LIMIT = 50      # threshold for quality attribute in vcf file. Quality must be > QUALITY_LIMIT
+CHAIN_LEN_LIMIT = 10    # threshold for nucleotides chain. Len(chain) must be < CHAIN_LEN_LIMIT
 EVENT_MAPPING = {'Homozygous Copy Loss': '0', 'CN Loss': '1', 'CN Gain': '3', 'High Copy Gain': '4'}
 
 
@@ -29,6 +28,11 @@ class MutationRecord:
         self.event_code = int(fields[10])
 
 
+"""
+Creates a support file containing parsed target attributes from vcf file.
+As input it must be vcf file
+As output it creates supoort text file
+"""
 def parse_vfc_file(input_file, output_file, contains_control_sample, control_sample_idx):
     output_file = open(output_file, "w")
     output_file.write("sample\tchrom\tposition\tref\talt\tgt\tdp\tref_counts\tvar_counts\tcn_n\n")
@@ -46,18 +50,16 @@ def parse_vfc_file(input_file, output_file, contains_control_sample, control_sam
     output_file.close()
 
 
+"""
+Returning names of tumor samples (biopsy samples) from vcf file
+"""
 def parse_vfc_header(line):
     line = re.sub(r".*FORMAT", "", line).strip()
     biopsy_names = line.split("\t")
     return biopsy_names
 
-    # for i in range(len(biopsy_names)):
-    #     if biopsy_names[i].endswith("C"):
-    #         control_sample_positions.append(i)
-    #
-    # return biopsy_names, control_sample_positions
-
-
+"""
+"""
 def parse_vfc_line(biopsy_names, line, output_file, contains_control_sample, control_sample_idx):
     line = line.split("\t")
     chrom = line[0]
@@ -331,6 +333,3 @@ if __name__ == '__main__':
 
     generate_pyclone_input(input_dir='./Samples/P12/tmp/vcf_events',
                            output_dir='./Samples/P12/Pyclone_input')
-
-
-
